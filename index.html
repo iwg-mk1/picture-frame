@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CNC Frame - Machinable Path Designer</title>
+    <style>
+        body { margin: 0; overflow: hidden; display: flex; height: 100vh; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #222;}
+        #leftView, #rightView { flex: 1; position: relative; }
+        #rightView { border-left: 2px solid #444; }
+        #ui { position: absolute; top: 15px; left: 15px; background: rgba(250, 250, 250, 0.95); padding: 15px; border-radius: 8px; z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.3); width: 260px;}
+        h3 { margin-top: 0; margin-bottom: 15px; color: #333; }
+        .input-group { margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+        .input-group label { font-size: 13px; color: #555; }
+        .input-group input[type="number"], .input-group select { width: 80px; padding: 4px; border: 1px solid #ccc; border-radius: 4px; }
+        .checkbox-group { margin-top: 8px; margin-bottom: 4px; font-size: 13px; color: #333; }
+        hr { border: none; border-top: 1px solid #ddd; margin: 12px 0; }
+        button { background: #0078d7; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; width: 100%; margin-top: 5px; font-weight: bold;}
+        button:hover { background: #005a9e; }
+        #exportBtn { background: #28a745; margin-top: 10px; }
+        #exportBtn:hover { background: #218838; }
+        .hint { font-size: 12px; color: #666; margin-top: 10px; text-align: center; font-style: italic; }
+        .label-overlay { position: absolute; bottom: 15px; left: 15px; color: white; font-weight: bold; font-size: 18px; pointer-events: none; text-shadow: 1px 1px 3px rgba(0,0,0,0.8); }
+        #loading { position: absolute; top: 50%; left: 25%; transform: translate(-50%, -50%); color: white; font-weight: bold; font-size: 20px; display: none; background: rgba(0,0,0,0.7); padding: 10px 20px; border-radius: 8px; pointer-events: none; z-index: 20;}
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <div id="ui">
+        <h3>Extrusion Designer</h3>
+        <div class="input-group">
+            <label>Material:</label>
+            <select id="matSelect">
+                <option value="normal">Normal (Debug)</option>
+                <option value="standard">Wood (SSAO)</option>
+            </select>
+        </div>
+        <hr>
+        <div class="input-group">
+            <label>Inner Width:</label><input id="inW" type="number" value="20" min="5" max="100"/>
+        </div>
+        <div class="input-group">
+            <label>Inner Height:</label><input id="inH" type="number" value="30" min="5" max="100"/>
+        </div>
+        <hr>
+        <div class="input-group">
+            <label>Operation:</label>
+            <select id="brushOp">
+                <option value="subtract">Subtract</option>
+                <option value="add">Add</option>
+            </select>
+        </div>
+        <div class="input-group">
+            <label>Thickness (W):</label><input id="brushRadius" type="number" value="1.0" min="0.1" step="0.1"/>
+        </div>
+        <div class="input-group">
+            <label>Depth (Z):</label><input id="brushDepth" type="number" value="1.0" min="0.1" step="0.1"/>
+        </div>
+        <hr>
+        <div class="checkbox-group">
+            <label><input id="roundCorners" type="checkbox" checked/> Round Caps & Corners</label>
+        </div>
+        <div class="checkbox-group">
+            <label><input id="symCenter" type="checkbox" checked/> Symmetry: Center</label>
+        </div>
+        <div class="checkbox-group">
+            <label><input id="symDiag" type="checkbox" checked/> Symmetry: Diagonal</label>
+        </div>
+        <hr>
+        <div class="checkbox-group">
+            <label><input id="trimInterior" type="checkbox" checked/> <b>Trim Interior Bounds</b></label>
+        </div>
+        <div class="checkbox-group">
+            <label><input id="wireframeToggle" type="checkbox"/> Show Global Wireframe</label>
+        </div>
+        <button id="clearBtn">Clear Strokes</button>
+        <button id="exportBtn">Export as STL</button>
+        <div class="hint">Draw directly on the model.<br><b>Hold Ctrl</b> to orbit the camera!</div>
+    </div>
+
+    <div id="loading">Computing Extrusion...</div>
+    <div id="leftView"><div class="label-overlay">Bottom Molding Segment</div></div>
+    <div id="rightView"><div class="label-overlay">Full Frame Assembly</div></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { STLExporter } from 'three/addons/exporters/STLExporter.js';
+        
+        // Post-Processing Imports for SSAO
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
+
+        import Module from 'https://cdn.jsdelivr.net/npm/manifold-3d@2.4.1/manifold.js';
+
+        const state = {
+            innerWidth: 20, innerHeight: 30, moldingWidth: 4, moldingDepth: 2,
+            strokes: [] 
+        };
+
+        let Manifold;
+        let leftScene, rightScene, cameraLeft, cameraRight, rendererL, rendererR;
+        let leftMesh = null;
+        let rightMesh = null; 
+        let leftWireframe = null;
+        let rightWireframe = null;
+        
+        // Render Pipeline Variables
+        let composerL, composerR, ssaoPassL, ssaoPassR;
+
+        // Materials Setup
+        const normalMat = new THREE.MeshNormalMaterial({ flatShading: true, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
+        const standardMat = new THREE.MeshStandardMaterial({ color: 0xc19a6b, roughness: 0.9, metalness: 0.05, flatShading: true, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
+        let currentMaterial = normalMat; // Defaults to Normal
+        
+        const wireMaterial = new THREE.LineBasicMaterial({ color: 0xffffff });
+        
+        let currentStrokePts = [];
+        let drawingLine = null;
+        let activeDrawPlane = null;
+
+        Module().then(function(wasm) {
+            wasm.setup();
+            Manifold = wasm.Manifold;
+            initThreeJS();
+            bindUI();
+            rebuildAll();
+            animate();
+        });
+
+        // --- 2D Polygon Path Math w/ Rounded Corners ---
+        function getOffsetPolygon(pts, width, rounded) {
+            const left = [], right = [];
+            const halfW = width / 2;
+            
+            for (let i = 0; i < pts.length; i++) {
+                let dir = new THREE.Vector2();
+                if (i === 0) {
+                    dir.subVectors(pts[1], pts[0]).normalize();
+                } else if (i === pts.length - 1) {
+                    dir.subVectors(pts[i], pts[i-1]).normalize();
+                } else {
+                    dir.subVectors(pts[i+1], pts[i-1]).normalize(); 
+                }
+                
+                const normal = new THREE.Vector2(-dir.y, dir.x);
+                left.push(new THREE.Vector2(pts[i].x + normal.x * halfW, pts[i].y + normal.y * halfW));
+                right.push(new THREE.Vector2(pts[i].x - normal.x * halfW, pts[i].y - normal.y * halfW));
+            }
+            
+            const poly = [];
+            for(let i = 0; i < left.length; i++) poly.push([left[i].x, left[i].y]);
+            
+            if (rounded) {
+                const center = pts[pts.length - 1];
+                const forwardDir = new THREE.Vector2().subVectors(pts[pts.length - 1], pts[pts.length - 2]).normalize();
+                const baseAngle = Math.atan2(forwardDir.y, forwardDir.x);
+                for (let k = 1; k < 10; k++) {
+                    const angle = baseAngle + Math.PI/2 - (Math.PI * k / 10);
+                    poly.push([center.x + Math.cos(angle)*halfW, center.y + Math.sin(angle)*halfW]);
+                }
+            }
+
+            for(let i = right.length - 1; i >= 0; i--) poly.push([right[i].x, right[i].y]);
+
+            if (rounded) {
+                const center = pts[0];
+                const forwardDir = new THREE.Vector2().subVectors(pts[1], pts[0]).normalize();
+                const baseAngle = Math.atan2(forwardDir.y, forwardDir.x);
+                for (let k = 1; k < 10; k++) {
+                    const angle = baseAngle - Math.PI/2 - (Math.PI * k / 10);
+                    poly.push([center.x + Math.cos(angle)*halfW, center.y + Math.sin(angle)*halfW]);
+                }
+            }
+            
+            let area = 0;
+            for (let i = 0; i < poly.length; i++) {
+                let j = (i + 1) % poly.length;
+                area += poly[i][0] * poly[j][1] - poly[j][0] * poly[i][1];
+            }
+            if (area < 0) poly.reverse();
+            
+            return [poly];
+        }
+
+        // --- Core 3D Solid Generation ---
+        function createStrokeSolid(pts, thickness, depth, operation, rounded, isSide) {
+            if (pts.length < 2) return null;
+
+            const ratio = isSide ? (state.innerHeight / state.innerWidth) : 1;
+            const mappedPts = pts.map(p => new THREE.Vector2(p.x * ratio, p.y));
+            
+            const polygons = getOffsetPolygon(mappedPts, thickness, rounded);
+            const zAvg = pts.reduce((sum, p) => sum + p.z, 0) / pts.length;
+            
+            try {
+                let extrudeHeight, zOffset;
+
+                if (operation === 'subtract') {
+                    const cutterBottom = zAvg - depth;
+                    const cutterTop = 20; 
+                    extrudeHeight = cutterTop - cutterBottom;
+                    zOffset = cutterBottom;
+                } else {
+                    const targetTopHeight = zAvg + depth;
+                    extrudeHeight = targetTopHeight + 1; 
+                    zOffset = 0; 
+                }
+
+                let solid = Manifold.extrude(polygons, extrudeHeight);
+                return solid.translate([0, 0, zOffset]);
+                
+            } catch (e) {
+                console.error("Manifold Extrusion Failed.", e);
+                return null;
+            }
+        }
+
+        // --- Frame CSG Logic ---
+        function buildSegment(length, width, depth, isSide) {
+            let box = Manifold.cube([length + 2 * width, width, depth], true)
+                              .translate([0, -width / 2, depth / 2]);
+
+            const cutterR = Manifold.cube([200, 200, 200], true).translate([0, 100, 0]).rotate([0, 0, -45]).translate([length / 2, 0, 0]);
+            const cutterL = Manifold.cube([200, 200, 200], true).translate([0, 100, 0]).rotate([0, 0, 45]).translate([-length / 2, 0, 0]);
+            let segment = box.subtract(cutterR).subtract(cutterL);
+
+            for (let stroke of state.strokes) {
+                if (!isSide || stroke.symDiag) {
+                    let strokeSolid = createStrokeSolid(stroke.points, stroke.thickness, stroke.depth, stroke.operation, stroke.rounded, isSide);
+                    if (strokeSolid) {
+                        if (stroke.operation === 'subtract') segment = segment.subtract(strokeSolid);
+                        else segment = segment.add(strokeSolid);
+                    }
+
+                    if (stroke.symCenter) {
+                        const mirroredPts = stroke.points.map(p => new THREE.Vector3(-p.x, p.y, p.z));
+                        let mirroredSolid = createStrokeSolid(mirroredPts, stroke.thickness, stroke.depth, stroke.operation, stroke.rounded, isSide);
+                        if (mirroredSolid) {
+                            if (stroke.operation === 'subtract') segment = segment.subtract(mirroredSolid);
+                            else segment = segment.add(mirroredSolid);
+                        }
+                    }
+                }
+            }
+
+            return segment;
+        }
+
+        function extractGeometry(manifoldSolid) {
+            const mesh = manifoldSolid.getMesh();
+            const positions = new Float32Array(mesh.numVert * 3);
+            for (let i = 0; i < mesh.numVert; i++) {
+                positions[i * 3] = mesh.vertProperties[i * mesh.numProp];
+                positions[i * 3 + 1] = mesh.vertProperties[i * mesh.numProp + 1];
+                positions[i * 3 + 2] = mesh.vertProperties[i * mesh.numProp + 2];
+            }
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setIndex(new THREE.BufferAttribute(mesh.triVerts, 1));
+            geometry.computeVertexNormals();
+            return geometry;
+        }
+
+        function rebuildAll() {
+            if (!Manifold) return;
+
+            if (leftMesh) leftScene.remove(leftMesh);
+            if (rightMesh) rightScene.remove(rightMesh);
+            if (leftWireframe) leftScene.remove(leftWireframe);
+            if (rightWireframe) rightScene.remove(rightWireframe);
+
+            const bottomSolid = buildSegment(state.innerWidth, state.moldingWidth, state.moldingDepth, false);
+            const sideSolid = buildSegment(state.innerHeight, state.moldingWidth, state.moldingDepth, true);
+
+            // Left View
+            const bottomGeo = extractGeometry(bottomSolid);
+            leftMesh = new THREE.Mesh(bottomGeo, currentMaterial);
+            leftScene.add(leftMesh);
+            
+            leftWireframe = new THREE.LineSegments(new THREE.WireframeGeometry(bottomGeo), wireMaterial);
+            leftWireframe.visible = document.getElementById('wireframeToggle').checked;
+            leftScene.add(leftWireframe);
+
+            // Right View (Full Assembly)
+            const bottomM = bottomSolid.translate([0, -state.innerHeight / 2, 0]);
+            const topM = bottomSolid.rotate([0, 0, 180]).translate([0, state.innerHeight / 2, 0]);
+            const rightM = sideSolid.rotate([0, 0, 90]).translate([state.innerWidth / 2, 0, 0]);
+            const leftM = sideSolid.rotate([0, 0, -90]).translate([-state.innerWidth / 2, 0, 0]);
+
+            let fullSolid = bottomM.add(topM).add(rightM).add(leftM);
+
+            if (document.getElementById('trimInterior').checked) {
+                const trimBox = Manifold.cube([state.innerWidth, state.innerHeight, 500], true);
+                fullSolid = fullSolid.subtract(trimBox);
+            }
+
+            const fullGeo = extractGeometry(fullSolid);
+            rightMesh = new THREE.Mesh(fullGeo, currentMaterial);
+            rightScene.add(rightMesh);
+            
+            rightWireframe = new THREE.LineSegments(new THREE.WireframeGeometry(fullGeo), wireMaterial);
+            rightWireframe.visible = document.getElementById('wireframeToggle').checked;
+            rightScene.add(rightWireframe);
+        }
+
+        // --- Three.js Setup & Events ---
+        function initThreeJS() {
+            const leftDiv = document.getElementById('leftView');
+            const rightDiv = document.getElementById('rightView');
+
+            leftScene = new THREE.Scene();
+            rightScene = new THREE.Scene();
+
+            // Augmented lighting to support the Standard Material
+            const addLights = (scene) => {
+                scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+                
+                const mainLight = new THREE.DirectionalLight(0xffffff, 4); 
+                mainLight.position.set(20, 30, 40);
+                scene.add(mainLight);
+                
+                const fillLight = new THREE.DirectionalLight(0xffffff, 0.5);
+                fillLight.position.set(-20, -30, -40);
+                scene.add(fillLight);
+            };
+            addLights(leftScene);
+            addLights(rightScene);
+
+            rendererL = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            rendererL.setSize(leftDiv.clientWidth, leftDiv.clientHeight);
+            leftDiv.appendChild(rendererL.domElement);
+
+            rendererR = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            rendererR.setSize(rightDiv.clientWidth, rightDiv.clientHeight);
+            rightDiv.appendChild(rendererR.domElement);
+
+            cameraLeft = new THREE.PerspectiveCamera(45, leftDiv.clientWidth / leftDiv.clientHeight, 0.1, 1000);
+            cameraLeft.position.set(0, -10, 40);
+
+            cameraRight = new THREE.PerspectiveCamera(45, rightDiv.clientWidth / rightDiv.clientHeight, 0.1, 1000);
+            cameraRight.position.set(0, 0, 60);
+
+            const controlsL = new OrbitControls(cameraLeft, rendererL.domElement);
+            const controlsR = new OrbitControls(cameraRight, rendererR.domElement);
+            controlsL.enabled = false;
+            controlsR.enabled = false;
+
+            // --- Post-Processing Setup for SSAO ---
+            composerL = new EffectComposer(rendererL);
+            composerL.addPass(new RenderPass(leftScene, cameraLeft));
+            ssaoPassL = new SSAOPass(leftScene, cameraLeft, leftDiv.clientWidth, leftDiv.clientHeight);
+            ssaoPassL.kernelRadius = 12;
+            ssaoPassL.minDistance = 0.001;
+            ssaoPassL.maxDistance = 0.2;
+            ssaoPassL.enabled = false; // Disabled initially (Normal mat is default)
+            composerL.addPass(ssaoPassL);
+
+            composerR = new EffectComposer(rendererR);
+            composerR.addPass(new RenderPass(rightScene, cameraRight));
+            ssaoPassR = new SSAOPass(rightScene, cameraRight, rightDiv.clientWidth, rightDiv.clientHeight);
+            ssaoPassR.kernelRadius = 12;
+            ssaoPassR.minDistance = 0.001;
+            ssaoPassR.maxDistance = 0.2;
+            ssaoPassR.enabled = false;
+            composerR.addPass(ssaoPassR);
+
+            window.addEventListener('keydown', (e) => {
+                if (e.key === 'Control') { controlsL.enabled = true; controlsR.enabled = true; }
+            });
+            window.addEventListener('keyup', (e) => {
+                if (e.key === 'Control') { controlsL.enabled = false; controlsR.enabled = false; }
+            });
+
+            let isPointerDown = false;
+
+            leftDiv.addEventListener('pointerdown', (e) => { 
+                if(e.button !== 0 || !leftMesh || e.ctrlKey) return; 
+                
+                isPointerDown = true;
+                activeDrawPlane = null; 
+                leftDiv.setPointerCapture(e.pointerId);
+                currentStrokePts = [];
+                
+                const lineMat = new THREE.LineBasicMaterial({ color: 0x00aaff, depthTest: false });
+                drawingLine = new THREE.Line(new THREE.BufferGeometry(), lineMat);
+                leftScene.add(drawingLine);
+                
+                raycastPoint(e, true); 
+            });
+            
+            leftDiv.addEventListener('pointermove', (e) => {
+                if (!isPointerDown) return;
+                raycastPoint(e, false);
+            });
+
+            leftDiv.addEventListener('pointerup', (e) => { 
+                if (!isPointerDown) return;
+                isPointerDown = false;
+                leftDiv.releasePointerCapture(e.pointerId);
+                
+                if (drawingLine) leftScene.remove(drawingLine);
+
+                if (currentStrokePts.length > 1) {
+                    document.getElementById('loading').style.display = 'block';
+                    
+                    setTimeout(() => {
+                        const curve = new THREE.CatmullRomCurve3(currentStrokePts);
+                        const numSegments = Math.max(20, Math.floor(curve.getLength() * 6)); 
+                        const smoothedPoints = curve.getPoints(numSegments);
+
+                        state.strokes.push({
+                            points: smoothedPoints,
+                            thickness: parseFloat(document.getElementById('brushRadius').value),
+                            depth: parseFloat(document.getElementById('brushDepth').value),
+                            operation: document.getElementById('brushOp').value,
+                            rounded: document.getElementById('roundCorners').checked,
+                            symCenter: document.getElementById('symCenter').checked,
+                            symDiag: document.getElementById('symDiag').checked
+                        });
+                        rebuildAll();
+                        document.getElementById('loading').style.display = 'none';
+                    }, 50);
+                }
+            });
+
+            function raycastPoint(e, isStart) {
+                const rect = leftDiv.getBoundingClientRect();
+                const mouse = new THREE.Vector2(
+                    ((e.clientX - rect.left) / rect.width) * 2 - 1,
+                    -((e.clientY - rect.top) / rect.height) * 2 + 1
+                );
+
+                const raycaster = new THREE.Raycaster();
+                raycaster.setFromCamera(mouse, cameraLeft);
+                
+                let pt = null;
+                const intersects = raycaster.intersectObject(leftMesh);
+
+                if (intersects.length > 0) {
+                    pt = intersects[0].point;
+                    if (isStart) activeDrawPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -pt.z);
+                } 
+                else if (!isStart && activeDrawPlane) {
+                    pt = new THREE.Vector3();
+                    raycaster.ray.intersectPlane(activeDrawPlane, pt);
+                }
+
+                if (pt) {
+                    const brushThick = parseFloat(document.getElementById('brushRadius').value);
+                    const safeDistance = Math.max(0.2, brushThick * 0.8);
+
+                    if (currentStrokePts.length === 0 || currentStrokePts[currentStrokePts.length - 1].distanceTo(pt) > safeDistance) {
+                        currentStrokePts.push(pt);
+                        
+                        const positions = new Float32Array(currentStrokePts.length * 3);
+                        for(let i=0; i<currentStrokePts.length; i++) {
+                            positions[i*3] = currentStrokePts[i].x;
+                            positions[i*3+1] = currentStrokePts[i].y;
+                            positions[i*3+2] = currentStrokePts[i].z;
+                        }
+                        drawingLine.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                    }
+                }
+            }
+
+            window.addEventListener('resize', () => {
+                cameraLeft.aspect = leftDiv.clientWidth / leftDiv.clientHeight;
+                cameraLeft.updateProjectionMatrix();
+                // Ensure composer size updates cleanly on resize
+                composerL.setSize(leftDiv.clientWidth, leftDiv.clientHeight);
+                
+                cameraRight.aspect = rightDiv.clientWidth / rightDiv.clientHeight;
+                cameraRight.updateProjectionMatrix();
+                composerR.setSize(rightDiv.clientWidth, rightDiv.clientHeight);
+            });
+        }
+
+        function bindUI() {
+            ['inW', 'inH'].forEach(id => {
+                document.getElementById(id).addEventListener('change', (e) => {
+                    if (id === 'inW') state.innerWidth = parseFloat(e.target.value);
+                    if (id === 'inH') state.innerHeight = parseFloat(e.target.value);
+                    rebuildAll();
+                });
+            });
+
+            // Material Switching Logic
+            document.getElementById('matSelect').addEventListener('change', (e) => {
+                const isStandard = e.target.value === 'standard';
+                currentMaterial = isStandard ? standardMat : normalMat;
+                
+                if (leftMesh) leftMesh.material = currentMaterial;
+                if (rightMesh) rightMesh.material = currentMaterial;
+                
+                // Toggle the SSAO post-processing passes on/off for performance
+                ssaoPassL.enabled = isStandard;
+                ssaoPassR.enabled = isStandard;
+            });
+
+            document.getElementById('trimInterior').addEventListener('change', rebuildAll);
+
+            document.getElementById('wireframeToggle').addEventListener('change', (e) => {
+                if (leftWireframe) leftWireframe.visible = e.target.checked;
+                if (rightWireframe) rightWireframe.visible = e.target.checked;
+            });
+
+            document.getElementById('clearBtn').addEventListener('click', () => {
+                state.strokes = [];
+                rebuildAll();
+            });
+
+            document.getElementById('exportBtn').addEventListener('click', () => {
+                if (!rightMesh) return;
+                
+                const exporter = new STLExporter();
+                const stlString = exporter.parse(rightScene);
+                
+                const blob = new Blob([stlString], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                
+                const link = document.createElement('a');
+                link.style.display = 'none';
+                link.href = url;
+                link.download = `custom_frame_${state.innerWidth}x${state.innerHeight}.stl`;
+                document.body.appendChild(link);
+                link.click();
+                
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+            });
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            // Replaced standard renderer loop with the EffectComposer pipeline
+            if (composerL) composerL.render();
+            if (composerR) composerR.render();
+        }
+    </script>
+</body>
+</html>
