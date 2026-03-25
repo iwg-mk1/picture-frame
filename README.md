@@ -10,7 +10,15 @@ Instead, this works by generating offset curves from the users cursor path, extr
 [Pages](https://github.com/iwg-mk1/picture-frame)
 
 
+## Offsett Curve
+
 <img width="684" height="787" alt="image" src="https://github.com/user-attachments/assets/7cd2104a-863a-483e-b27b-b0cda6d28c1b" />
+
+
+## Symmetries
+
+<img width="1430" height="1620" alt="image" src="https://github.com/user-attachments/assets/a51075c6-c910-4666-8c06-3eeb823734d7" />
+
 
 
 <img width="1604" height="1640" alt="image" src="https://github.com/user-attachments/assets/7ed153c4-dfb6-4566-8cce-37fb1c32195f" />
