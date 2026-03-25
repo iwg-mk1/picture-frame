@@ -7,7 +7,7 @@ Instead, this works by generating offset curves from the users cursor path, extr
 
 [Demo](https://youtu.be/aUw_yOV74YE)
 
-[Pages](https://github.com/iwg-mk1/picture-frame)
+[Pages]([https://github.com/iwg-mk1/picture-frame](https://iwg-mk1.github.io/picture-frame/))
 
 
 ## Offsett Curve
